@@ -1,0 +1,647 @@
+================================================================================
+  BCCL EMPLOYEE SELF-SERVICE PORTAL — BACKEND IMPLEMENTATION PROMPT
+================================================================================
+
+Build a complete backend REST API for the BCCL Employee Self-Service Portal
+using the following tech stack:
+
+  - Framework:    Express.js (Node.js)
+  - Database:     MySQL (SQL)
+  - Auth:         JWT (jsonwebtoken)
+  - Hashing:      bcryptjs
+  - PDF:          pdfkit (for payslip PDF download)
+  - Other:        cors, dotenv
+
+================================================================================
+  NPM PACKAGES REQUIRED
+================================================================================
+
+npm init -y
+npm install express mysql2 jsonwebtoken bcryptjs cors dotenv pdfkit
+npm install --save-dev nodemon
+
+================================================================================
+  PROJECT FOLDER STRUCTURE
+================================================================================
+
+backend/
+├── server.js                  # Entry point — Express app setup
+├── .env                       # Environment variables
+├── package.json
+├── config/
+│   └── db.js                  # MySQL connection pool
+├── middleware/
+│   └── authMiddleware.js      # JWT verification middleware
+├── routes/
+│   ├── authRoutes.js          # /api/auth/* routes
+│   └── employeeRoutes.js      # /api/employee/* routes
+├── controllers/
+│   ├── authController.js      # Login, verify-identity, change-password
+│   └── employeeController.js  # Profile, payslips, PDF download
+├── seeds/
+│   └── seedDatabase.js        # Import employees.json into MySQL
+└── sql/
+    └── schema.sql             # CREATE TABLE statements
+
+================================================================================
+  ENVIRONMENT VARIABLES (.env)
+================================================================================
+
+PORT=5000
+DB_HOST=localhost
+DB_USER=root
+DB_PASSWORD=your_mysql_password
+DB_NAME=bccl_portal
+JWT_SECRET=your_super_secret_jwt_key_change_this
+JWT_EXPIRES_IN=24h
+
+================================================================================
+  EXPRESS SERVER SETUP (server.js)
+================================================================================
+
+- Use cors() middleware with origin set to http://localhost:5173 (Vite dev server)
+- Use express.json() middleware for parsing JSON request bodies
+- Mount auth routes at /api/auth
+- Mount employee routes at /api/employee
+- Add a global error handler
+- Listen on PORT from .env (default 5000)
+
+================================================================================
+  MYSQL DATABASE CONNECTION (config/db.js)
+================================================================================
+
+- Use mysql2/promise to create a connection pool
+- Read DB_HOST, DB_USER, DB_PASSWORD, DB_NAME from .env
+- Set connectionLimit to 10
+
+================================================================================
+  JWT AUTH MIDDLEWARE (middleware/authMiddleware.js)
+================================================================================
+
+- Extract Bearer token from Authorization header
+- Verify token using jwt.verify() with JWT_SECRET
+- Set req.employeeId and req.pisNo from decoded token
+- Return 401 with message "Unauthorized. Invalid or expired token." on failure
+
+================================================================================
+  SQL DATABASE SCHEMA (sql/schema.sql)
+================================================================================
+
+CREATE DATABASE IF NOT EXISTS bccl_portal;
+USE bccl_portal;
+
+CREATE TABLE IF NOT EXISTS employees (
+    id              INT AUTO_INCREMENT PRIMARY KEY,
+    pis_no          VARCHAR(20)  NOT NULL UNIQUE,
+    name            VARCHAR(100) NOT NULL,
+    designation     VARCHAR(100),
+    department      VARCHAR(100),
+    area            VARCHAR(100),
+    grade           VARCHAR(10),
+    email           VARCHAR(100),
+    phone           VARCHAR(15),
+    date_of_birth   DATE,
+    date_of_joining DATE,
+    pf_account      VARCHAR(50),
+    bank_account    VARCHAR(50),
+    aadhaar_no      VARCHAR(20),
+    password_hash   VARCHAR(255) NOT NULL,
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS payslips (
+    id                  INT AUTO_INCREMENT PRIMARY KEY,
+    employee_id         INT NOT NULL,
+    month               VARCHAR(20) NOT NULL,
+    basic               INT DEFAULT 0,
+    da                  INT DEFAULT 0,
+    hra                 INT DEFAULT 0,
+    transport_allowance INT DEFAULT 0,
+    medical_allowance   INT DEFAULT 0,
+    gross_pay           INT DEFAULT 0,
+    pf_deduction        INT DEFAULT 0,
+    professional_tax    INT DEFAULT 0,
+    income_tax          INT DEFAULT 0,
+    total_deductions    INT DEFAULT 0,
+    net_pay             INT DEFAULT 0,
+    created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE,
+    UNIQUE KEY unique_emp_month (employee_id, month)
+);
+
+CREATE INDEX idx_pis_no ON employees(pis_no);
+CREATE INDEX idx_employee_month ON payslips(employee_id, month);
+
+================================================================================
+  DATABASE SEED SCRIPT (seeds/seedDatabase.js)
+================================================================================
+
+- Read employees.json from the frontend project (src/data/employees.json)
+- For each employee:
+    - Hash the plain-text password using bcrypt with salt rounds = 10
+    - INSERT into employees table (ON DUPLICATE KEY UPDATE)
+    - INSERT each payslip into payslips table (ON DUPLICATE KEY UPDATE)
+- Log progress for each employee seeded
+
+================================================================================
+  IMPORTANT: COLUMN NAME MAPPING
+================================================================================
+
+The SQL database uses snake_case columns but the frontend expects camelCase
+in JSON responses. Your controllers MUST map between the two:
+
+  SQL Column            →   JSON Key (Frontend)
+  ─────────────────────────────────────────────
+  pis_no                →   pisNo
+  date_of_birth         →   dateOfBirth
+  date_of_joining       →   dateOfJoining
+  pf_account            →   pfAccount
+  bank_account          →   bankAccount
+  aadhaar_no            →   aadhaarNo
+  transport_allowance   →   transportAllowance
+  medical_allowance     →   medicalAllowance
+  gross_pay             →   grossPay
+  pf_deduction          →   pfDeduction
+  professional_tax      →   professionalTax
+  income_tax            →   incomeTax
+  total_deductions      →   totalDeductions
+  net_pay               →   netPay
+
+
+================================================================================
+================================================================================
+  API ENDPOINTS — FULL SPECIFICATION
+================================================================================
+================================================================================
+
+
+================================================================================
+  API 1:  POST /api/auth/login  —  Employee Login
+================================================================================
+
+Auth Required:  NO
+Captcha:        Validated on frontend only (NOT sent to backend)
+
+--- REQUEST ---
+
+POST /api/auth/login
+Content-Type: application/json
+
+Payload:
+{
+  "pisNo": "10100001",
+  "password": "Bccl@10100001"
+}
+
+Fields:
+  pisNo     (string, required) — Employee PIS Number (login ID)
+  password  (string, required) — Employee password
+
+--- CONTROLLER LOGIC ---
+
+1. Find employee by PIS number: SELECT * FROM employees WHERE pis_no = ?
+2. If not found → 401
+3. Compare password with bcrypt hash using bcrypt.compare()
+4. If mismatch → 401
+5. Fetch payslips: SELECT * FROM payslips WHERE employee_id = ? ORDER BY id DESC
+6. Generate JWT token with { id, pisNo } payload, expires in 24h
+7. Map snake_case → camelCase
+8. Return employee object + payslips + token
+9. NEVER return password_hash in response
+
+--- RESPONSE: SUCCESS (200) ---
+
+{
+  "success": true,
+  "message": "Login successful",
+  "data": {
+    "employee": {
+      "id": 1,
+      "pisNo": "10100001",
+      "name": "AJAY SAHAY",
+      "designation": "Security Officer",
+      "department": "Legal Dept",
+      "area": "HQ - Dhanbad",
+      "grade": "E2",
+      "email": "ajay.sahay0@bccl.gov.in",
+      "phone": "9872183950",
+      "dateOfBirth": "1983-04-21",
+      "dateOfJoining": "2006-08-26",
+      "pfAccount": "BCCL/CMPF/10001",
+      "bankAccount": "XXXX XXXX 1001",
+      "aadhaarNo": "XXXX XXXX 2000",
+      "payslips": [
+        {
+          "month": "May 2026",
+          "basic": 49218,
+          "da": 18846,
+          "hra": 9805,
+          "transportAllowance": 3128,
+          "medicalAllowance": 1675,
+          "grossPay": 82672,
+          "pfDeduction": 5906,
+          "professionalTax": 200,
+          "incomeTax": 7567,
+          "totalDeductions": 13673,
+          "netPay": 68999
+        }
+      ]
+    },
+    "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+  }
+}
+
+--- RESPONSE: FAILURE (401) ---
+
+{
+  "success": false,
+  "message": "Invalid PIS Number or Password."
+}
+
+
+================================================================================
+  API 2:  GET /api/employee/profile  —  Get Employee Profile
+================================================================================
+
+Auth Required:  YES (Bearer JWT token)
+Used by:        Profile Page, Dashboard
+
+--- REQUEST ---
+
+GET /api/employee/profile
+Authorization: Bearer <jwt-token>
+
+No request body. Employee is identified from the JWT token (req.employeeId).
+
+--- CONTROLLER LOGIC ---
+
+1. SELECT employee by req.employeeId (from JWT middleware)
+2. Do NOT select password_hash column
+3. Map snake_case → camelCase
+4. Return employee profile
+
+--- RESPONSE: SUCCESS (200) ---
+
+{
+  "success": true,
+  "data": {
+    "id": 1,
+    "pisNo": "10100001",
+    "name": "AJAY SAHAY",
+    "designation": "Security Officer",
+    "department": "Legal Dept",
+    "area": "HQ - Dhanbad",
+    "grade": "E2",
+    "email": "ajay.sahay0@bccl.gov.in",
+    "phone": "9872183950",
+    "dateOfBirth": "1983-04-21",
+    "dateOfJoining": "2006-08-26",
+    "pfAccount": "BCCL/CMPF/10001",
+    "bankAccount": "XXXX XXXX 1001",
+    "aadhaarNo": "XXXX XXXX 2000"
+  }
+}
+
+--- RESPONSE: UNAUTHORIZED (401) ---
+
+{
+  "success": false,
+  "message": "Unauthorized. Invalid or expired token."
+}
+
+
+================================================================================
+  API 3:  GET /api/employee/payslips  —  Get Employee Payslips
+================================================================================
+
+Auth Required:  YES (Bearer JWT token)
+Used by:        Dashboard (shows recent 3), PaySlip Page (shows all 6)
+
+--- REQUEST ---
+
+GET /api/employee/payslips
+Authorization: Bearer <jwt-token>
+
+No request body.
+
+--- CONTROLLER LOGIC ---
+
+1. SELECT all payslips for req.employeeId ordered by id DESC
+2. Map snake_case → camelCase for each payslip
+3. Return array of payslips
+
+--- RESPONSE: SUCCESS (200) ---
+
+{
+  "success": true,
+  "data": {
+    "payslips": [
+      {
+        "month": "May 2026",
+        "basic": 49218,
+        "da": 18846,
+        "hra": 9805,
+        "transportAllowance": 3128,
+        "medicalAllowance": 1675,
+        "grossPay": 82672,
+        "pfDeduction": 5906,
+        "professionalTax": 200,
+        "incomeTax": 7567,
+        "totalDeductions": 13673,
+        "netPay": 68999
+      },
+      {
+        "month": "April 2026",
+        "basic": 49643,
+        "da": 19676,
+        "hra": 8956,
+        "transportAllowance": 4620,
+        "medicalAllowance": 3624,
+        "grossPay": 86519,
+        "pfDeduction": 5957,
+        "professionalTax": 200,
+        "incomeTax": 5295,
+        "totalDeductions": 11452,
+        "netPay": 75067
+      }
+    ]
+  }
+}
+
+
+================================================================================
+  API 4:  POST /api/auth/verify-identity  —  Verify Identity (Password Change Step 1)
+================================================================================
+
+Auth Required:  YES (Bearer JWT token)
+Used by:        Change Password modal — Step 1
+
+--- REQUEST ---
+
+POST /api/auth/verify-identity
+Authorization: Bearer <jwt-token>
+Content-Type: application/json
+
+Payload:
+{
+  "empId": "10100001",
+  "lastPassword": "Bccl@10100001",
+  "dob": "1983-04-21"
+}
+
+Fields:
+  empId         (string, required) — Employee PIS Number
+  lastPassword  (string, required) — Current/last password
+  dob           (string, required) — Date of birth (YYYY-MM-DD format)
+
+--- CONTROLLER LOGIC ---
+
+1. Validate all 3 fields are present → 400 if missing
+2. SELECT employee by req.employeeId
+3. Check empId matches employee.pis_no → 400 if mismatch
+4. Compare lastPassword with password_hash using bcrypt → 400 if mismatch
+5. Compare dob with employee.date_of_birth → 400 if mismatch
+6. Generate short-lived verification token (JWT, 10 min expiry, purpose: "password-change")
+7. Return verification token
+
+--- RESPONSE: SUCCESS (200) ---
+
+{
+  "success": true,
+  "message": "Identity verified successfully.",
+  "data": {
+    "verificationToken": "temp-verification-token-here"
+  }
+}
+
+--- RESPONSE: FAILURE (400) ---
+
+{
+  "success": false,
+  "message": "Employee ID (PIS Number) does not match."
+}
+
+Other possible error messages:
+  - "Last password does not match our records."
+  - "Date of Birth does not match our records."
+  - "All fields are required for verification."
+
+
+================================================================================
+  API 5:  POST /api/auth/change-password  —  Change Password (Step 2)
+================================================================================
+
+Auth Required:  YES (Bearer JWT token)
+Used by:        Change Password modal — Step 2
+
+--- REQUEST ---
+
+POST /api/auth/change-password
+Authorization: Bearer <jwt-token>
+Content-Type: application/json
+
+Payload:
+{
+  "verificationToken": "temp-verification-token-here",
+  "newPassword": "NewSecurePass@123",
+  "confirmPassword": "NewSecurePass@123"
+}
+
+Fields:
+  verificationToken  (string, required) — Token from verify-identity step
+  newPassword        (string, required) — New password (min 8 characters)
+  confirmPassword    (string, required) — Must match newPassword
+
+--- CONTROLLER LOGIC ---
+
+1. Validate newPassword and confirmPassword are present → 400 if missing
+2. Validate newPassword.length >= 8 → 400 if too short
+3. Validate newPassword === confirmPassword → 400 if mismatch
+4. Verify the verificationToken using jwt.verify() → 400 if invalid/expired
+5. Check decoded.purpose === "password-change" → 400 if wrong purpose
+6. Hash the new password with bcrypt (salt rounds = 10)
+7. UPDATE employees SET password_hash = ? WHERE id = decoded.id
+8. Return success
+
+--- RESPONSE: SUCCESS (200) ---
+
+{
+  "success": true,
+  "message": "Password changed successfully!"
+}
+
+--- RESPONSE: FAILURE (400) ---
+
+{
+  "success": false,
+  "message": "Passwords do not match."
+}
+
+Other possible error messages:
+  - "Password must be at least 8 characters long."
+  - "Please enter and confirm your new password."
+  - "Invalid or expired verification token."
+
+
+================================================================================
+  API 6:  GET /api/employee/payslip/download/:month  —  Download Payslip PDF
+================================================================================
+
+Auth Required:  YES (Bearer JWT token)
+Used by:        PayslipDetail modal → "Download PDF" button
+
+--- REQUEST ---
+
+GET /api/employee/payslip/download/May%202026
+Authorization: Bearer <jwt-token>
+
+The :month parameter is URL-encoded (e.g., "May%202026" → "May 2026").
+
+--- CONTROLLER LOGIC ---
+
+1. Decode the month parameter using decodeURIComponent()
+2. SELECT employee by req.employeeId
+3. SELECT payslip by employee_id and month → 404 if not found
+4. Generate PDF using pdfkit with:
+   - Title: "BCCL - Salary Statement"
+   - Employee details: name, PIS number, designation, department
+   - Earnings: basic, DA, HRA, transport allowance, medical allowance, gross pay
+   - Deductions: PF, professional tax, income tax, total deductions
+   - Net Pay (highlighted)
+5. Set response headers:
+   - Content-Type: application/pdf
+   - Content-Disposition: attachment; filename="payslip_May_2026.pdf"
+6. Pipe PDF stream to response
+
+--- RESPONSE: SUCCESS (200) ---
+
+Content-Type: application/pdf
+Content-Disposition: attachment; filename="payslip_May_2026.pdf"
+
+<binary PDF data>
+
+--- RESPONSE: NOT FOUND (404) ---
+
+{
+  "success": false,
+  "message": "Payslip not found for the specified month."
+}
+
+
+================================================================================
+  ROUTES SETUP
+================================================================================
+
+--- routes/authRoutes.js ---
+
+POST   /login              →  authController.login            (NO auth middleware)
+POST   /verify-identity    →  authController.verifyIdentity   (auth middleware)
+POST   /change-password    →  authController.changePassword   (auth middleware)
+
+--- routes/employeeRoutes.js ---
+
+GET    /profile                  →  employeeController.getProfile       (auth middleware)
+GET    /payslips                 →  employeeController.getPayslips      (auth middleware)
+GET    /payslip/download/:month  →  employeeController.downloadPayslip  (auth middleware)
+
+
+================================================================================
+  API SUMMARY TABLE
+================================================================================
+
+#   Method   Endpoint                                Auth      Purpose
+──  ──────   ──────────────────────────────────────   ───────   ──────────────────────────
+1   POST     /api/auth/login                         None      Employee login
+2   GET      /api/employee/profile                   JWT       Get employee profile
+3   GET      /api/employee/payslips                  JWT       Get all payslips (6 months)
+4   POST     /api/auth/verify-identity               JWT       Verify identity for pwd change
+5   POST     /api/auth/change-password               JWT       Set new password
+6   GET      /api/employee/payslip/download/:month   JWT       Download payslip as PDF
+
+
+================================================================================
+  EMPLOYEE DATA MODEL (JSON — what frontend expects)
+================================================================================
+
+{
+  "id": 1,
+  "pisNo": "10100001",
+  "name": "AJAY SAHAY",
+  "designation": "Security Officer",
+  "department": "Legal Dept",
+  "area": "HQ - Dhanbad",
+  "grade": "E2",
+  "email": "ajay.sahay0@bccl.gov.in",
+  "phone": "9872183950",
+  "dateOfBirth": "1983-04-21",
+  "dateOfJoining": "2006-08-26",
+  "pfAccount": "BCCL/CMPF/10001",
+  "bankAccount": "XXXX XXXX 1001",
+  "aadhaarNo": "XXXX XXXX 2000"
+}
+
+
+================================================================================
+  PAYSLIP DATA MODEL (JSON — what frontend expects)
+================================================================================
+
+{
+  "month": "May 2026",
+  "basic": 49218,
+  "da": 18846,
+  "hra": 9805,
+  "transportAllowance": 3128,
+  "medicalAllowance": 1675,
+  "grossPay": 82672,
+  "pfDeduction": 5906,
+  "professionalTax": 200,
+  "incomeTax": 7567,
+  "totalDeductions": 13673,
+  "netPay": 68999
+}
+
+
+================================================================================
+  QUICK START COMMANDS
+================================================================================
+
+# 1. Create the backend folder and initialize
+mkdir backend && cd backend
+npm init -y
+npm install express mysql2 jsonwebtoken bcryptjs cors dotenv pdfkit
+npm install --save-dev nodemon
+
+# 2. Create the MySQL database and tables
+mysql -u root -p < sql/schema.sql
+
+# 3. Seed the database from employees.json
+npm run seed
+
+# 4. Start the development server
+npm run dev
+
+
+================================================================================
+  IMPORTANT NOTES
+================================================================================
+
+1. NEVER return password_hash in any API response.
+
+2. Store passwords as bcrypt hashes (salt rounds = 10), never plain text.
+   The seed script handles this automatically.
+
+3. The CORS origin should match your frontend URL (default: http://localhost:5173).
+
+4. The frontend currently loads all data from a local JSON file
+   (src/data/employees.json). To connect to this backend, the frontend
+   needs to be refactored to use fetch/axios calls.
+
+5. Frontend files that need changes to connect to backend:
+   - LoginPage.jsx  → Replace employees.find() with POST /api/auth/login
+   - App.jsx        → Store JWT token in state/localStorage
+   - Dashboard.jsx  → Fetch via GET /api/employee/profile + /payslips
+   - ProfilePage.jsx → Use POST /api/auth/verify-identity + /change-password
+   - PayslipPage.jsx → Use GET /api/employee/payslips + download endpoint
+
+================================================================================
